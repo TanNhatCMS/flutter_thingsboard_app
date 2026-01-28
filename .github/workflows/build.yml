@@ -1,14 +1,39 @@
 name: Build Flutter App
 
 on:
-  push:
-    branches: [ "main", "develop" ]
-  pull_request:
-    branches: [ "main", "develop" ]
   workflow_dispatch:
 
 jobs:
+  check-configs:
+    runs-on: ubuntu-latest
+    outputs:
+      build_android: ${{ steps.check.outputs.build_android }}
+      build_ios: ${{ steps.check.outputs.build_ios }}
+    steps:
+      - id: check
+        shell: bash
+        run: |
+          cat << 'EOF' > configs_temp.json
+          ${{ secrets.CONFIGS_JSON }}
+          EOF
+          
+          if [ ! -s configs_temp.json ] || [ "$(cat configs_temp.json)" == "" ]; then
+            echo "build_android=false" >> $GITHUB_OUTPUT
+            echo "build_ios=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Check Android keys
+          HAS_ANDROID=$(jq 'if . == null then false else has("androidApplicationId") and has("androidApplicationName") and has("thingsboardOAuth2CallbackUrlScheme") and has("thingsboardAndroidAppSecret") end' configs_temp.json)
+          echo "build_android=$HAS_ANDROID" >> $GITHUB_OUTPUT
+          
+          # Check iOS keys
+          HAS_IOS=$(jq 'if . == null then false else has("iosApplicationId") and has("iosApplicationName") and has("thingsboardIosAppSecret") end' configs_temp.json)
+          echo "build_ios=$HAS_IOS" >> $GITHUB_OUTPUT
+
   build-android:
+    needs: check-configs
+    if: needs.check-configs.outputs.build_android == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,3 +76,34 @@ jobs:
         with:
           name: android-appbundle
           path: build/app/outputs/bundle/release/*.aab
+
+  build-ios:
+    needs: check-configs
+    if: needs.check-configs.outputs.build_ios == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.29.0'
+          cache: true
+
+      - name: Create configs.json
+        run: echo '${{ secrets.CONFIGS_JSON }}' > configs.json
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Run build_runner
+        run: flutter pub run build_runner build --delete-conflicting-outputs
+
+      - name: Build IPA (No Codesign)
+        run: flutter build ipa --release --no-codesign --no-tree-shake-icons --dart-define-from-file configs.json
+
+      - name: Upload iOS Archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-archive
+          path: build/ios/archive/*.xcarchive
